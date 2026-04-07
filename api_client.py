@@ -65,14 +65,19 @@ def fetch_monitoring_page(data_from: str, data_to: str, page: int) -> list:
     return response.json().get("content", [])
 
 
-def fetch_all_monitoring(data_from: str, data_to: str):
-    """Iterates all pages and yields each record from the monitoring endpoint."""
+def fetch_all_monitoring(data_from: str, data_to: str, on_page=None):
+    """Iterates all pages and yields each record from the monitoring endpoint.
+
+    on_page: optional callback(page_number, records_in_page) called after each page fetch.
+    """
     page = 0
     total = 0
     while True:
         records = fetch_monitoring_page(data_from, data_to, page)
         if not records:
             break
+        if on_page:
+            on_page(page, len(records))
         for record in records:
             yield record
         total += len(records)
