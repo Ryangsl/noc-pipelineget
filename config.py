@@ -1,0 +1,16 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+API_BASE_URL = os.getenv("API_BASE_URL", "http://10.215.39.31:22205")
+
+MYSQL_HOST = os.getenv("MYSQL_HOST", "localhost")
+MYSQL_PORT = int(os.getenv("MYSQL_PORT", 3306))
+MYSQL_DB = os.getenv("MYSQL_DB", "noc")
+MYSQL_USER = os.getenv("MYSQL_USER", "")
+MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
+
+PAGE_SIZE = int(os.getenv("PAGE_SIZE", 100))
+INITIAL_DATE = os.getenv("INITIAL_DATE", "2025-01-01T00:00")
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""
+NOC Pipeline — API to MySQL sync
+Runs incrementally: fetches data from the last synced date up to now.
+
+Usage:
+    python sync.py
+
+Schedule via cron (every hour):
+    0 * * * * cd /home/user/noc-pipelineget && python sync.py >> /var/log/noc-sync.log 2>&1
+"""
+
+import logging
+import sys
+from datetime import datetime
+
+import api_client
+import config
+import db
+
+logging.basicConfig(
+    level=getattr(logging, config.LOG_LEVEL.upper(), logging.INFO),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+logger = logging.getLogger("sync")
+
+
+def run():
+    logger.info("=== NOC Sync started ===")
+    conn = None
+    try:
+        conn = db.get_connection()
+        db.init_tables(conn)
+
+        # Step 1: sync use cases
+        use_cases_map = api_client.get_use_cases()
+        db.upsert_use_cases(conn, use_cases_map)
+
+        # Step 2: determine date range
+        data_from = db.get_last_sync_date(conn) or config.INITIAL_DATE
+        data_to = datetime.now().strftime("%Y-%m-%dT%H:%M")
+        logger.info("Sync window: %s → %s", data_from, data_to)
+
+        # Step 3: fetch and save records
+        count = 0
+        for record in api_client.fetch_all_monitoring(data_from, data_to):
+            db.upsert_record(conn, record, use_cases_map)
+            count += 1
+
+        logger.info("Saved %d records to history_io", count)
+
+        # Step 4: update sync state
+        db.set_last_sync_date(conn, data_to)
+
+        logger.info("=== NOC Sync completed successfully ===")
+
+    except Exception as exc:
+        logger.error("Sync failed: %s", exc, exc_info=True)
+        sys.exit(1)
+    finally:
+        if conn and conn.is_connected():
+            conn.close()
+
+
+if __name__ == "__main__":
+    run()
