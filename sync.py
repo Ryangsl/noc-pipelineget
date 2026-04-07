@@ -30,27 +30,27 @@ def run():
         conn = db.get_connection()
         db.init_tables(conn)
 
-        # Step 1: authenticate
-        token = api_client.get_token()
+        if not config.API_TOKEN:
+            raise ValueError("API_TOKEN is not set in .env — copy the Bearer token from the browser")
 
-        # Step 2: sync use cases
-        use_cases_map = api_client.get_use_cases(token)
+        # Step 1: sync use cases
+        use_cases_map = api_client.get_use_cases()
         db.upsert_use_cases(conn, use_cases_map)
 
-        # Step 3: determine date range
+        # Step 2: determine date range
         data_from = db.get_last_sync_date(conn) or config.INITIAL_DATE
         data_to = datetime.now().strftime("%Y-%m-%dT%H:%M")
         logger.info("Sync window: %s → %s", data_from, data_to)
 
-        # Step 4: fetch and save records
+        # Step 3: fetch and save records
         count = 0
-        for record in api_client.fetch_all_monitoring(token, data_from, data_to):
+        for record in api_client.fetch_all_monitoring(data_from, data_to):
             db.upsert_record(conn, record, use_cases_map)
             count += 1
 
         logger.info("Saved %d records to history_io", count)
 
-        # Step 5: update sync state
+        # Step 4: update sync state
         db.set_last_sync_date(conn, data_to)
 
         logger.info("=== NOC Sync completed successfully ===")
