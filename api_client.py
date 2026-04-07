@@ -7,7 +7,33 @@ logger = logging.getLogger(__name__)
 TIMEOUT = 30
 
 
-def get_use_cases():
+def get_token() -> str:
+    """Authenticates via OAuth2 Password Grant and returns the access_token."""
+    logger.info("Authenticating at %s", config.API_AUTH_URL)
+    response = requests.post(
+        config.API_AUTH_URL,
+        data={
+            "grant_type": "password",
+            "client_id": config.API_CLIENT_ID,
+            "username": config.API_USERNAME,
+            "password": config.API_PASSWORD,
+        },
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        timeout=TIMEOUT,
+    )
+    response.raise_for_status()
+    token = response.json().get("access_token")
+    if not token:
+        raise ValueError("No access_token in auth response")
+    logger.info("Authentication successful")
+    return token
+
+
+def _auth_headers(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def get_use_cases(token: str) -> dict:
     """Fetches all use cases from GET /core/commons/use-cases.
 
     Returns a dict mapping useCase value -> {technology, vendor, label, network_label}.
@@ -15,7 +41,7 @@ def get_use_cases():
     url = f"{config.API_BASE_URL}/core/commons/use-cases"
     logger.info("Fetching use cases from %s", url)
 
-    response = requests.get(url, timeout=TIMEOUT)
+    response = requests.get(url, headers=_auth_headers(token), timeout=TIMEOUT)
     response.raise_for_status()
 
     data = response.json()
@@ -36,7 +62,7 @@ def get_use_cases():
     return mapping
 
 
-def fetch_monitoring_page(data_from: str, data_to: str, page: int) -> list:
+def fetch_monitoring_page(token: str, data_from: str, data_to: str, page: int) -> list:
     """Fetches a single page from POST /core/history-io/monitoring.
 
     Returns the list of records in 'content', or empty list if no more data.
@@ -61,19 +87,19 @@ def fetch_monitoring_page(data_from: str, data_to: str, page: int) -> list:
     }
 
     logger.debug("POST %s page=%d", url, page)
-    response = requests.post(url, json=payload, timeout=TIMEOUT)
+    response = requests.post(url, json=payload, headers=_auth_headers(token), timeout=TIMEOUT)
     response.raise_for_status()
 
     data = response.json()
     return data.get("content", [])
 
 
-def fetch_all_monitoring(data_from: str, data_to: str):
+def fetch_all_monitoring(token: str, data_from: str, data_to: str):
     """Iterates all pages and yields each record from the monitoring endpoint."""
     page = 0
     total = 0
     while True:
-        records = fetch_monitoring_page(data_from, data_to, page)
+        records = fetch_monitoring_page(token, data_from, data_to, page)
         if not records:
             break
         for record in records:
