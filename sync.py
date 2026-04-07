@@ -42,11 +42,20 @@ def run():
         data_to = datetime.now().strftime("%Y-%m-%dT%H:%M")
         logger.info("Sync window: %s → %s", data_from, data_to)
 
-        # Step 3: fetch and save records
+        # Step 3: fetch and save records in batches
         count = 0
+        batch = []
         for record in api_client.fetch_all_monitoring(data_from, data_to):
-            db.upsert_record(conn, record, use_cases_map)
-            count += 1
+            batch.append(record)
+            if len(batch) >= config.BATCH_SIZE:
+                db.upsert_records_batch(conn, batch, use_cases_map)
+                count += len(batch)
+                logger.info("Saved %d records so far...", count)
+                batch = []
+
+        if batch:
+            db.upsert_records_batch(conn, batch, use_cases_map)
+            count += len(batch)
 
         logger.info("Saved %d records to history_io", count)
 

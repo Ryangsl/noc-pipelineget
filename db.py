@@ -94,33 +94,32 @@ def upsert_use_cases(conn, use_cases_map: dict):
     logger.info("Upserted %d use cases into DB", len(rows))
 
 
-def upsert_record(conn, record: dict, use_cases_map: dict):
+_UPSERT_SQL = """
+    INSERT INTO history_io
+        (id, insert_date, cod_response, result, msg_id, ticket_id,
+         use_cases, type_event, system_origin, micro_service, technology, vendor)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    ON DUPLICATE KEY UPDATE
+        insert_date   = VALUES(insert_date),
+        cod_response  = VALUES(cod_response),
+        result        = VALUES(result),
+        msg_id        = VALUES(msg_id),
+        ticket_id     = VALUES(ticket_id),
+        use_cases     = VALUES(use_cases),
+        type_event    = VALUES(type_event),
+        system_origin = VALUES(system_origin),
+        micro_service = VALUES(micro_service),
+        technology    = VALUES(technology),
+        vendor        = VALUES(vendor),
+        synced_at     = CURRENT_TIMESTAMP
+"""
+
+
+def _record_to_row(record: dict, use_cases_map: dict) -> tuple:
     use_cases_list = record.get("useCases") or []
     primary_use_case = use_cases_list[0] if use_cases_list else None
     uc_info = use_cases_map.get(primary_use_case, {}) if primary_use_case else {}
-
-    sql = """
-        INSERT INTO history_io
-            (id, insert_date, cod_response, result, msg_id, ticket_id,
-             use_cases, type_event, system_origin, micro_service, technology, vendor)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        ON DUPLICATE KEY UPDATE
-            insert_date   = VALUES(insert_date),
-            cod_response  = VALUES(cod_response),
-            result        = VALUES(result),
-            msg_id        = VALUES(msg_id),
-            ticket_id     = VALUES(ticket_id),
-            use_cases     = VALUES(use_cases),
-            type_event    = VALUES(type_event),
-            system_origin = VALUES(system_origin),
-            micro_service = VALUES(micro_service),
-            technology    = VALUES(technology),
-            vendor        = VALUES(vendor),
-            synced_at     = CURRENT_TIMESTAMP
-    """
-
-    cursor = conn.cursor()
-    cursor.execute(sql, (
+    return (
         record.get("id"),
         record.get("insertDate"),
         record.get("codResponse"),
@@ -133,7 +132,16 @@ def upsert_record(conn, record: dict, use_cases_map: dict):
         json.dumps(record.get("microService") or []),
         uc_info.get("network_value"),
         uc_info.get("vendor"),
-    ))
+    )
+
+
+def upsert_records_batch(conn, records: list, use_cases_map: dict):
+    """Inserts/updates a batch of records in a single transaction."""
+    if not records:
+        return
+    rows = [_record_to_row(r, use_cases_map) for r in records]
+    cursor = conn.cursor()
+    cursor.executemany(_UPSERT_SQL, rows)
     conn.commit()
     cursor.close()
 

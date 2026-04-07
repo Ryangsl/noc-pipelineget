@@ -12,6 +12,7 @@ MYSQL_DB       = os.getenv("MYSQL_DB", "noc")
 MYSQL_USER     = os.getenv("MYSQL_USER", "")
 MYSQL_PASSWORD = os.getenv("MYSQL_PASSWORD", "")
 
-PAGE_SIZE    = int(os.getenv("PAGE_SIZE", 100))
+PAGE_SIZE    = int(os.getenv("PAGE_SIZE", 500))
+BATCH_SIZE   = int(os.getenv("BATCH_SIZE", 500))
 INITIAL_DATE = os.getenv("INITIAL_DATE", "2025-01-01T00:00")
 LOG_LEVEL    = os.getenv("LOG_LEVEL", "INFO")
