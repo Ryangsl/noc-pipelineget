@@ -46,6 +46,14 @@ CREATE TABLE IF NOT EXISTS sync_state (
 )
 """
 
+DDL_SYNC_CONFIG = """
+CREATE TABLE IF NOT EXISTS sync_config (
+    key_name   VARCHAR(50) PRIMARY KEY,
+    value      VARCHAR(100),
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+)
+"""
+
 
 def get_connection():
     return mysql.connector.connect(
@@ -59,7 +67,7 @@ def get_connection():
 
 def init_tables(conn):
     cursor = conn.cursor()
-    for ddl in (DDL_USE_CASES, DDL_HISTORY_IO, DDL_SYNC_STATE):
+    for ddl in (DDL_USE_CASES, DDL_HISTORY_IO, DDL_SYNC_STATE, DDL_SYNC_CONFIG):
         cursor.execute(ddl)
     conn.commit()
     cursor.close()
@@ -165,3 +173,53 @@ def set_last_sync_date(conn, date_str: str):
     conn.commit()
     cursor.close()
     logger.info("Updated last_sync_date to %s", date_str)
+
+
+def count_existing_ids(conn, record_ids: list) -> int:
+    """Returns how many of the given record IDs already exist in history_io."""
+    if not record_ids:
+        return 0
+    placeholders = ",".join(["%s"] * len(record_ids))
+    cursor = conn.cursor()
+    cursor.execute(
+        f"SELECT COUNT(*) FROM history_io WHERE id IN ({placeholders})",
+        record_ids,
+    )
+    count = cursor.fetchone()[0]
+    cursor.close()
+    return count
+
+
+def get_oldest_sync_date(conn) -> str | None:
+    """Returns the backward-sync frontier date stored in sync_config."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM sync_config WHERE key_name = 'oldest_sync_date'")
+    row = cursor.fetchone()
+    cursor.close()
+    return row[0] if row else None
+
+
+def set_oldest_sync_date(conn, date_str: str):
+    """Persists the backward-sync frontier in sync_config."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO sync_config (key_name, value) VALUES ('oldest_sync_date', %s)
+        ON DUPLICATE KEY UPDATE value = VALUES(value)
+        """,
+        (date_str,),
+    )
+    conn.commit()
+    cursor.close()
+    logger.info("Updated oldest_sync_date to %s", date_str)
+
+
+def get_oldest_record_date(conn) -> str | None:
+    """Returns the MIN(insert_date) currently in history_io (used to seed backward sync)."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT MIN(insert_date) FROM history_io")
+    row = cursor.fetchone()
+    cursor.close()
+    if row and row[0]:
+        return row[0].strftime("%Y-%m-%dT%H:%M")
+    return None

@@ -16,3 +16,9 @@ PAGE_SIZE    = int(os.getenv("PAGE_SIZE", 500))
 BATCH_SIZE   = int(os.getenv("BATCH_SIZE", 500))
 INITIAL_DATE = os.getenv("INITIAL_DATE", "2025-01-01T00:00")
 LOG_LEVEL    = os.getenv("LOG_LEVEL", "INFO")
+
+# Dual-direction sync
+# BACKWARD_WINDOW_DAYS: how many days of historical data to fetch per run (backward sync)
+# DUPLICATE_THRESHOLD: stop forward sync when this fraction of a page already exists in DB
+BACKWARD_WINDOW_DAYS = int(os.getenv("BACKWARD_WINDOW_DAYS", 7))
+DUPLICATE_THRESHOLD  = float(os.getenv("DUPLICATE_THRESHOLD", "0.9"))

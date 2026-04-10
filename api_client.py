@@ -65,23 +65,34 @@ def fetch_monitoring_page(data_from: str, data_to: str, page: int) -> list:
     return response.json().get("content", [])
 
 
-def fetch_all_monitoring(data_from: str, data_to: str, on_page=None):
-    """Iterates all pages and yields each record from the monitoring endpoint.
+def fetch_pages(data_from: str, data_to: str):
+    """Yields (page_number, records_list) for each non-empty page.
 
-    on_page: optional callback(page_number, records_in_page) called after each page fetch.
+    Stops automatically when the API returns an empty page or fewer records
+    than PAGE_SIZE (last page). Callers receive full pages and can decide
+    whether to stop early based on duplicate detection.
     """
     page = 0
     total = 0
     while True:
         records = fetch_monitoring_page(data_from, data_to, page)
         if not records:
+            logger.info("Page %d returned empty — finished fetching %s → %s", page, data_from, data_to)
             break
-        if on_page:
-            on_page(page, len(records))
-        for record in records:
-            yield record
         total += len(records)
-        logger.info("Fetched page %d — %d records so far", page, total)
+        logger.info("Fetched page %d — %d records (running total: %d)", page, len(records), total)
+        yield page, records
         if len(records) < config.PAGE_SIZE:
             break
         page += 1
+
+
+def fetch_all_monitoring(data_from: str, data_to: str, on_page=None):
+    """Iterates all pages and yields each record from the monitoring endpoint.
+
+    on_page: optional callback(page_number, records_in_page) called after each page fetch.
+    """
+    for page, records in fetch_pages(data_from, data_to):
+        if on_page:
+            on_page(page, len(records))
+        yield from records
