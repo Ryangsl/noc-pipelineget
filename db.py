@@ -225,6 +225,30 @@ def get_oldest_record_date(conn) -> str | None:
     return None
 
 
+def get_forward_cursor(conn) -> str | None:
+    """Returns the historical-scan cursor (how far forward we've scanned from INITIAL_DATE)."""
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM sync_config WHERE key_name = 'forward_cursor'")
+    row = cursor.fetchone()
+    cursor.close()
+    return row[0] if row else None
+
+
+def set_forward_cursor(conn, date_str: str):
+    """Advances the historical-scan cursor in sync_config."""
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        INSERT INTO sync_config (key_name, value) VALUES ('forward_cursor', %s)
+        ON DUPLICATE KEY UPDATE value = VALUES(value)
+        """,
+        (date_str,),
+    )
+    conn.commit()
+    cursor.close()
+    logger.info("Updated forward_cursor to %s", date_str)
+
+
 def get_db_stats(conn) -> dict:
     """Returns a snapshot of history_io for diagnostic logging."""
     cursor = conn.cursor()

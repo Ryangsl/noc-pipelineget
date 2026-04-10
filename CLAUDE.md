@@ -25,24 +25,24 @@ noc-pipelineget/
 
 ## Features
 
-### 1. Sincronização Bidirecional (dual-direction sync)
-Cada execução faz **duas passagens** na seguinte ordem:
+### 1. Scan Histórico (INITIAL_DATE → now, cronológico)
+Cada execução avança um janela de `BACKWARD_WINDOW_DAYS` dias a partir de `forward_cursor`:
+- Ordena ASC (mais antigo primeiro) — varredura cronológica de 2025 para 2026
+- Sem parada antecipada: todos os registros da janela são upsertados
+- `forward_cursor` persiste em `sync_config` — interrupções não perdem o ponto de parada
+- Loga `% concluído` e `dias restantes` para visibilidade do progresso
+- Torna-se no-op quando `forward_cursor >= now` (histórico completo)
 
-**Forward sync** (dados novos):
-- Busca de `last_sync_date` até `now`
-- Para automaticamente assim que uma página ultrapassa `DUPLICATE_THRESHOLD`% de registros já existentes no banco — evita requisições desnecessárias à API
+### 2. Sync Incremental (last_sync_date → now)
+Após o scan histórico, busca registros criados desde a última execução:
+- Ordena DESC (mais recente primeiro) para processar dados novos imediatamente
+- Para automaticamente quando uma página atinge `DUPLICATE_THRESHOLD`% de registros já no banco
 - Atualiza `last_sync_date` em `sync_state` somente após sucesso completo
 
-**Backward sync** (dados históricos):
-- Após o forward, busca uma janela de `BACKWARD_WINDOW_DAYS` dias imediatamente antes do `oldest_sync_date` (fronteira histórica)
-- Inicializado automaticamente a partir do `MIN(insert_date)` já no banco
-- Avança a fronteira para trás a cada execução até chegar em `INITIAL_DATE`
-- Estado persistido na tabela `sync_config` — interrupções não perdem o ponto de parada
-
-### 2. Detecção de Duplicatas (forward sync)
-- `db.count_existing_ids(conn, ids)`: consulta a PK de `history_io` para a lista de IDs de cada página antes de upsertá-los
-- Verificação por página; se `existing/total >= DUPLICATE_THRESHOLD`, para de paginar
-- Registros da última página ainda são upsertados (podem conter atualizações)
+### 3. Detecção de Duplicatas (sync incremental)
+- `db.count_existing_ids(conn, ids)`: consulta a PK de `history_io` para os IDs de cada página antes de upsertá-los
+- Log por página: `N new + M already in DB (X% duplicate)`
+- Se `existing/total >= DUPLICATE_THRESHOLD`, para de paginar (economia de chamadas à API)
 
 ### 3. Autenticação Bearer Manual
 - Token OAuth2 Bearer copiado do browser (F12 → aba Rede → requisição `token` → Resposta)
@@ -104,10 +104,11 @@ Cada execução faz **duas passagens** na seguinte ordem:
 ### `sync_config` — estado genérico chave-valor
 | Coluna | Tipo | Descrição |
 |---|---|---|
-| `key_name` | VARCHAR(50) PK | Chave (`oldest_sync_date`) |
+| `key_name` | VARCHAR(50) PK | Chave |
 | `value` | VARCHAR(100) | Valor persistido |
 
-`oldest_sync_date` em `sync_config`: fronteira do backward sync; decrementada de `BACKWARD_WINDOW_DAYS` a cada execução bem-sucedida.
+Chaves em uso:
+- `forward_cursor`: posição atual do scan histórico; avança `BACKWARD_WINDOW_DAYS` a cada execução bem-sucedida até atingir `now`
 
 ---
 
@@ -115,21 +116,23 @@ Cada execução faz **duas passagens** na seguinte ordem:
 
 ```
 run()
-├── init_tables()          — cria DDLs se não existirem
-├── get_use_cases()        — atualiza mapeamento tecnologia/vendor
-├── run_forward_sync()
-│   ├── data_from = last_sync_date OR INITIAL_DATE
-│   ├── data_to   = now
-│   ├── _save_pages(..., stop_on_duplicates=True)
-│   │   └── per page: count_existing_ids → if ratio >= threshold → break
-│   └── set_last_sync_date(now)
-└── run_backward_sync()
-    ├── oldest = get_oldest_sync_date() OR MIN(insert_date) from history_io
-    ├── if oldest <= INITIAL_DATE → skip
-    ├── data_to   = oldest
-    ├── data_from = oldest - BACKWARD_WINDOW_DAYS  (capped at INITIAL_DATE)
-    ├── _save_pages(..., stop_on_duplicates=False)
-    └── set_oldest_sync_date(data_from)
+├── init_tables()              — cria DDLs se não existirem
+├── get_db_stats()             — loga: count, insert_date range, cursors
+├── get_use_cases()            — atualiza mapeamento tecnologia/vendor
+├── run_historical_scan()      — varredura cronológica (INITIAL_DATE → now)
+│   ├── cursor = get_forward_cursor() OR INITIAL_DATE
+│   ├── if cursor >= now → skip (histórico completo)
+│   ├── data_from = cursor
+│   ├── data_to   = cursor + BACKWARD_WINDOW_DAYS (capped at now)
+│   ├── _save_pages(..., sort_dir=None, stop_on_duplicates=False)
+│   │   └── ASC order, upserta tudo na janela sem parar
+│   └── set_forward_cursor(data_to)
+└── run_incremental_sync()     — captura dados novos desde last_sync_date
+    ├── data_from = get_last_sync_date() OR INITIAL_DATE
+    ├── data_to   = now
+    ├── _save_pages(..., sort_dir="DESC", stop_on_duplicates=True)
+    │   └── per page: count_existing_ids → loga new/existing → se ratio >= threshold → break
+    └── set_last_sync_date(now)
 ```
 
 ---
