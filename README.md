@@ -43,7 +43,9 @@ Edite `.env` com o token Bearer e as credenciais MySQL.
 
 ---
 
-## Como obter o token Bearer
+## Token Bearer
+
+### Obter o token pela primeira vez (antes de rodar)
 
 1. Abrir `http://10.215.39.31:22207` no browser e fazer login
 2. F12 → aba **Rede** → localizar requisição `token`
@@ -52,7 +54,26 @@ Edite `.env` com o token Bearer e as credenciais MySQL.
    ```
    API_TOKEN=eyJra...
    ```
-5. Token expira em ~1 hora — renovar antes de cada execução longa
+
+### Renovação automática durante a execução
+
+O token expira em ~1 hora. Quando isso acontece **o sync não cai** — ele pausa e exibe:
+
+```
+==============================================================
+  TOKEN EXPIRADO — 401 Unauthorized
+==============================================================
+  Como obter um novo token:
+    1. Abra o browser e faça login no sistema
+    2. F12  →  aba Rede  →  localizar requisição 'token'
+    3. Aba Resposta  →  copiar valor de 'access_token'
+       (começa com eyJra..., ~1000 caracteres)
+==============================================================
+
+Cole o novo token Bearer (entrada oculta):
+```
+
+Cole o novo token e pressione Enter. O sync **retoma exatamente de onde parou** e o novo token é salvo automaticamente no `.env` para a próxima execução.
 
 ---
 
@@ -89,7 +110,8 @@ Após o sync avançado, busca uma janela de `BACKWARD_WINDOW_DAYS` dias de dados
 
 | Sintoma | Causa provável | Solução |
 |---|---|---|
-| `401 Unauthorized` | Token expirado | Renovar `API_TOKEN` no `.env` |
+| Prompt de token aparece durante execução | Token expirado (normal, ~1h) | Colar novo token no prompt — sync continua automaticamente |
+| `RuntimeError: Token não fornecido` | Enter pressionado sem colar token | Reiniciar o sync; o estado foi preservado |
 | `Can't connect to MySQL` | Credenciais ou host errado | Verificar `MYSQL_*` no `.env` |
 | Sync retroativo parado em mesma data | `oldest_sync_date` já em `INITIAL_DATE` | Ajustar `INITIAL_DATE` para data mais antiga desejada |
 | Muitas requisições à API | `BACKWARD_WINDOW_DAYS` alto | Reduzir para 1–3 dias por execução |
