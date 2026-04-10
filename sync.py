@@ -36,36 +36,42 @@ logging.basicConfig(
 logger = logging.getLogger("sync")
 
 
-def _save_pages(conn, use_cases_map, data_from, data_to, *, stop_on_duplicates=False):
+def _save_pages(conn, use_cases_map, data_from, data_to, *, stop_on_duplicates=False, sort_dir=None):
     """Fetches all pages in [data_from, data_to] and upserts them in batches.
 
-    If stop_on_duplicates=True, checks each page's IDs against the DB BEFORE
-    upserting. When the fraction of already-existing records reaches
-    DUPLICATE_THRESHOLD, stops fetching further pages (the upsert for the
-    current page still runs so any updates are applied).
+    sort_dir: passed straight to the API ("DESC" for forward sync so newest
+              records are returned first — critical for duplicate-stop to work
+              correctly).
+
+    stop_on_duplicates: if True, checks each page's IDs against the DB BEFORE
+              upserting. Stops when existing/total >= DUPLICATE_THRESHOLD.
+              With DESC sort this fires only after all genuinely new records
+              have already been processed, at the correct historical boundary.
 
     Returns the total number of records saved.
     """
     count = 0
     batch = []
 
-    for page_num, page_records in api_client.fetch_pages(data_from, data_to):
+    for page_num, page_records in api_client.fetch_pages(data_from, data_to, sort_dir=sort_dir):
         should_stop = False
 
         if stop_on_duplicates:
             record_ids = [r.get("id") for r in page_records if r.get("id")]
             if record_ids:
+                # Check BEFORE extending batch so we see the real DB state
                 existing = db.count_existing_ids(conn, record_ids)
                 dup_ratio = existing / len(record_ids)
-                logger.debug(
-                    "Page %d duplicate check: %d/%d already in DB (%.0f%%)",
-                    page_num, existing, len(record_ids), dup_ratio * 100,
+                logger.info(
+                    "Page %d: %d/%d already in DB (%.0f%%) — %d new",
+                    page_num, existing, len(record_ids),
+                    dup_ratio * 100, len(record_ids) - existing,
                 )
                 if dup_ratio >= config.DUPLICATE_THRESHOLD:
                     logger.info(
-                        "Page %d: %.0f%% duplicates (threshold %.0f%%) — "
-                        "stopping forward sync early to save API calls",
-                        page_num, dup_ratio * 100, config.DUPLICATE_THRESHOLD * 100,
+                        "Page %d: reached %.0f%% duplicate threshold — "
+                        "all newer records already processed, stopping forward sync",
+                        page_num, dup_ratio * 100,
                     )
                     should_stop = True
 
@@ -87,16 +93,27 @@ def _save_pages(conn, use_cases_map, data_from, data_to, *, stop_on_duplicates=F
 
 
 def run_forward_sync(conn, use_cases_map):
-    """Syncs records from last_sync_date to now, with early-stop on duplicates.
+    """Syncs records from last_sync_date to now.
+
+    Requests the API with DESC sort so the NEWEST records are returned first.
+    This is critical: with ascending (default) order the oldest — already-synced
+    — records come first and trigger duplicate-stop before any new record is
+    seen, leaving a permanent gap.  With DESC the new records are processed
+    immediately and duplicate-stop fires only when we reach the already-synced
+    historical boundary.
 
     Updates last_sync_date in sync_state on success.
     Returns the number of records saved.
     """
     data_from = db.get_last_sync_date(conn) or config.INITIAL_DATE
     data_to = datetime.now().strftime("%Y-%m-%dT%H:%M")
-    logger.info("=== Forward sync: %s → %s ===", data_from, data_to)
+    logger.info("=== Forward sync: %s → %s (sort: DESC) ===", data_from, data_to)
 
-    count = _save_pages(conn, use_cases_map, data_from, data_to, stop_on_duplicates=True)
+    count = _save_pages(
+        conn, use_cases_map, data_from, data_to,
+        stop_on_duplicates=True,
+        sort_dir="DESC",
+    )
     db.set_last_sync_date(conn, data_to)
     logger.info("Forward sync done — %d records saved, last_sync_date → %s", count, data_to)
     return count
@@ -169,14 +186,27 @@ def run():
                 "API_TOKEN is not set in .env — copy the Bearer token from the browser"
             )
 
-        # Step 1: sync use cases
+        # Step 1: diagnostic snapshot
+        stats = db.get_db_stats(conn)
+        last_sync = db.get_last_sync_date(conn)
+        oldest_sync = db.get_oldest_sync_date(conn)
+        logger.info(
+            "DB state: %d records | insert_date range: %s → %s",
+            stats["count"], stats["min_date"] or "none", stats["max_date"] or "none",
+        )
+        logger.info(
+            "Sync state: last_sync_date=%s | oldest_sync_date=%s | INITIAL_DATE=%s",
+            last_sync or "none", oldest_sync or "none", config.INITIAL_DATE,
+        )
+
+        # Step 2: sync use cases
         use_cases_map = api_client.get_use_cases()
         db.upsert_use_cases(conn, use_cases_map)
 
-        # Step 2: forward sync — bring the latest records up to now
+        # Step 3: forward sync — bring the latest records up to now
         run_forward_sync(conn, use_cases_map)
 
-        # Step 3: backward sync — fill one window of historical data
+        # Step 4: backward sync — fill one window of historical data
         run_backward_sync(conn, use_cases_map)
 
         logger.info("=== NOC Sync completed successfully ===")

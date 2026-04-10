@@ -131,8 +131,16 @@ def get_use_cases() -> dict:
     return mapping
 
 
-def fetch_monitoring_page(data_from: str, data_to: str, page: int) -> list:
-    """Fetches a single page from POST /core/history-io/monitoring."""
+def fetch_monitoring_page(
+    data_from: str, data_to: str, page: int, sort_dir: str | None = None
+) -> list:
+    """Fetches a single page from POST /core/history-io/monitoring.
+
+    sort_dir: "DESC" returns newest records first (used by forward sync so new
+              records are processed before old ones and duplicate-stop fires at
+              the correct historical boundary).
+              None / "ASC" uses the API default (usually oldest first).
+    """
     url = f"{config.API_BASE_URL}/core/history-io/monitoring"
     payload = {
         "dataFrom": data_from,
@@ -148,26 +156,26 @@ def fetch_monitoring_page(data_from: str, data_to: str, page: int) -> list:
         "network": None,
         "vendor": None,
         "resultResponse": None,
-        "sortDir": None,
-        "sortfield": None,
+        "sortDir": sort_dir,
+        "sortfield": "insertDate" if sort_dir else None,
     }
 
-    logger.debug("POST %s page=%d", url, page)
+    logger.debug("POST %s page=%d sort=%s", url, page, sort_dir or "default")
     response = _do_request("post", url, json=payload)
     return response.json().get("content", [])
 
 
-def fetch_pages(data_from: str, data_to: str):
+def fetch_pages(data_from: str, data_to: str, sort_dir: str | None = None):
     """Yields (page_number, records_list) for each non-empty page.
 
+    sort_dir is forwarded to every page request (see fetch_monitoring_page).
     Stops automatically when the API returns an empty page or fewer records
-    than PAGE_SIZE (last page). Callers receive full pages and can decide
-    whether to stop early based on duplicate detection.
+    than PAGE_SIZE (last page).
     """
     page = 0
     total = 0
     while True:
-        records = fetch_monitoring_page(data_from, data_to, page)
+        records = fetch_monitoring_page(data_from, data_to, page, sort_dir=sort_dir)
         if not records:
             logger.info("Page %d returned empty — finished fetching %s → %s", page, data_from, data_to)
             break

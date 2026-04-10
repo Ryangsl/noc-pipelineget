@@ -223,3 +223,18 @@ def get_oldest_record_date(conn) -> str | None:
     if row and row[0]:
         return row[0].strftime("%Y-%m-%dT%H:%M")
     return None
+
+
+def get_db_stats(conn) -> dict:
+    """Returns a snapshot of history_io for diagnostic logging."""
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT COUNT(*), MIN(insert_date), MAX(insert_date) FROM history_io"
+    )
+    total, min_date, max_date = cursor.fetchone()
+    cursor.close()
+    return {
+        "count": total or 0,
+        "min_date": min_date.strftime("%Y-%m-%dT%H:%M") if min_date else None,
+        "max_date": max_date.strftime("%Y-%m-%dT%H:%M") if max_date else None,
+    }
