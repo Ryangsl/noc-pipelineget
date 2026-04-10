@@ -22,3 +22,5 @@ LOG_LEVEL    = os.getenv("LOG_LEVEL", "INFO")
 # DUPLICATE_THRESHOLD: stop forward sync when this fraction of a page already exists in DB
 BACKWARD_WINDOW_DAYS = int(os.getenv("BACKWARD_WINDOW_DAYS", 7))
 DUPLICATE_THRESHOLD  = float(os.getenv("DUPLICATE_THRESHOLD", "0.9"))
+# Seconds to wait between cycles once all history is covered (incremental-only mode)
+SYNC_INTERVAL = int(os.getenv("SYNC_INTERVAL", 300))

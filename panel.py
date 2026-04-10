@@ -4,6 +4,7 @@ NOC Pipeline — Painel Interativo
 Usage: python panel.py
 """
 import sys
+import time
 import threading
 from datetime import datetime, timedelta
 
@@ -29,10 +30,11 @@ class _State:
         self.running        = False
         self.stop           = threading.Event()
         # progresso geral
-        self.operation      = ""        # "Scan histórico" | "Sync incremental"
+        self.cycle          = 0         # número do ciclo atual (loop contínuo)
+        self.operation      = ""        # "Scan histórico" | "Sync incremental" | "Aguardando"
         self.page           = 0
         self.page_records   = 0
-        self.added          = 0
+        self.added          = 0         # total upsertados nesta sessão
         self.last_record: dict | None = None
         self.data_from      = ""
         self.data_to        = ""
@@ -42,6 +44,9 @@ class _State:
         # sync incremental (por página)
         self.new_in_page    = 0
         self.dup_in_page    = 0
+        # espera entre ciclos
+        self.wait_total     = 0         # segundos de espera configurados
+        self.wait_left      = 0         # segundos restantes
         # estado geral
         self.logs: list[str] = []
         self.error: str | None = None
@@ -55,6 +60,7 @@ class _State:
     def reset(self):
         self.running        = False
         self.stop.clear()
+        self.cycle          = 0
         self.operation      = ""
         self.page           = 0
         self.page_records   = 0
@@ -66,6 +72,8 @@ class _State:
         self.days_remaining = 0
         self.new_in_page    = 0
         self.dup_in_page    = 0
+        self.wait_total     = 0
+        self.wait_left      = 0
         self.logs           = []
         self.error          = None
 
@@ -78,6 +86,8 @@ def _build_live() -> Panel:
         status = "[bold red]ERRO[/bold red]"
     elif _s.stop.is_set():
         status = "[yellow]Encerrando...[/yellow]"
+    elif _s.operation == "Aguardando":
+        status = f"[dim]● Aguardando próximo ciclo ({_s.wait_left}s)[/dim]"
     elif _s.running:
         status = f"[bold green]● {_s.operation or 'SINCRONIZANDO'}[/bold green]"
     else:
@@ -87,6 +97,7 @@ def _build_live() -> Panel:
     info.add_column(style="bold cyan", no_wrap=True)
     info.add_column()
     info.add_row("Status",         status)
+    info.add_row("Ciclo",          str(_s.cycle) if _s.cycle else "—")
     info.add_row("Operação",       _s.operation or "—")
     info.add_row("Janela",         f"{_s.data_from}  →  {_s.data_to}" if _s.data_from else "—")
 
@@ -96,14 +107,21 @@ def _build_live() -> Panel:
         bar       = f"[green]{'█' * bar_done}[/green][dim]{'░' * bar_todo}[/dim]"
         info.add_row("Progresso",  f"{bar} [cyan]{_s.pct_done:.1f}%[/cyan]  ({_s.days_remaining}d restantes)")
 
+    if _s.operation == "Aguardando" and _s.wait_total:
+        done_frac  = max(0.0, 1.0 - _s.wait_left / _s.wait_total)
+        bar_done   = int(done_frac * 20)
+        bar_todo   = 20 - bar_done
+        bar        = f"[dim]{'█' * bar_done}{'░' * bar_todo}[/dim]"
+        info.add_row("Próximo em",  f"{bar} [dim]{_s.wait_left}s[/dim]")
+
     info.add_row("Página atual",   str(_s.page))
     info.add_row("Registros/pág",  str(_s.page_records))
 
     if _s.operation == "Sync incremental" and _s.page_records:
-        info.add_row("  Novos",    f"[green]{_s.new_in_page}[/green]")
+        info.add_row("  Novos",      f"[green]{_s.new_in_page}[/green]")
         info.add_row("  Existentes", f"[dim]{_s.dup_in_page}[/dim]")
 
-    info.add_row("Upsertados",     f"[bold white]{_s.added:,}[/bold white]")
+    info.add_row("Upsertados (sessão)", f"[bold white]{_s.added:,}[/bold white]")
 
     if _s.last_record:
         info.add_row("Último ticket",  str(_s.last_record.get("ticketId", "—")))
@@ -120,13 +138,13 @@ def _build_live() -> Panel:
 
     return Panel(
         layout,
-        title="[bold blue]NOC Pipeline — Sincronização[/bold blue]",
+        title="[bold blue]NOC Pipeline — Sincronização Contínua[/bold blue]",
         subtitle="[dim]Ctrl+C para parar[/dim]",
         border_style="blue",
         padding=(0, 1),
     )
 
-# ─── Thread de sincronização ──────────────────────────────────────────────────
+# ─── Thread de sincronização (loop contínuo) ─────────────────────────────────
 
 def _sync_worker():
     conn = None
@@ -146,126 +164,154 @@ def _sync_worker():
             f"{stats['min_date'] or 'vazio'} → {stats['max_date'] or 'vazio'}"
         )
 
-        fwd = db.get_forward_cursor(conn)
-        _s.log(f"Cursor histórico: [cyan]{fwd or 'não iniciado — começa em ' + config.INITIAL_DATE}[/cyan]")
-
         def _flush(batch):
             """Upserta o lote e atualiza o contador."""
             if not batch:
                 return
             db.upsert_records_batch(conn, batch, use_cases_map)
             _s.added += len(batch)
-            _s.log(f"Lote salvo — [bold white]{_s.added:,}[/bold white] upsertados no total")
+            _s.log(f"Lote salvo — [bold white]{_s.added:,}[/bold white] upsertados (sessão)")
 
-        # ─────────────────────────────────────────────────────────────────────
-        # Operação 1 — Scan histórico (INITIAL_DATE → now, ASC, sem parada)
-        # Avança forward_cursor em BACKWARD_WINDOW_DAYS por execução.
-        # ─────────────────────────────────────────────────────────────────────
-        now_dt     = datetime.now()
-        initial_dt = datetime.strptime(config.INITIAL_DATE, "%Y-%m-%dT%H:%M")
-        cursor_str = db.get_forward_cursor(conn) or config.INITIAL_DATE
-        cursor_dt  = datetime.strptime(cursor_str, "%Y-%m-%dT%H:%M")
+        # ─── Loop contínuo ────────────────────────────────────────────────────
+        while not _s.stop.is_set():
+            _s.cycle += 1
+            _s.log(f"[bold blue]▶ Ciclo {_s.cycle}[/bold blue]")
 
-        if cursor_dt < now_dt:
-            _s.operation = "Scan histórico"
-            window_end_dt = min(cursor_dt + timedelta(days=config.BACKWARD_WINDOW_DAYS), now_dt)
-            _s.data_from  = cursor_str
-            _s.data_to    = window_end_dt.strftime("%Y-%m-%dT%H:%M")
+            now_dt     = datetime.now()
+            initial_dt = datetime.strptime(config.INITIAL_DATE, "%Y-%m-%dT%H:%M")
+            cursor_str = db.get_forward_cursor(conn) or config.INITIAL_DATE
+            cursor_dt  = datetime.strptime(cursor_str, "%Y-%m-%dT%H:%M")
 
-            total_days        = max(1, (now_dt - initial_dt).days)
-            done_days         = max(0, (cursor_dt - initial_dt).days)
-            _s.pct_done       = done_days / total_days * 100
-            _s.days_remaining = max(0, (now_dt - window_end_dt).days)
+            # ─────────────────────────────────────────────────────────────────
+            # Operação 1 — Scan histórico (INITIAL_DATE → now, ASC, sem parada)
+            # Avança forward_cursor em BACKWARD_WINDOW_DAYS por ciclo.
+            # ─────────────────────────────────────────────────────────────────
+            if cursor_dt < now_dt:
+                _s.operation = "Scan histórico"
+                window_end_dt = min(cursor_dt + timedelta(days=config.BACKWARD_WINDOW_DAYS), now_dt)
+                _s.data_from  = cursor_str
+                _s.data_to    = window_end_dt.strftime("%Y-%m-%dT%H:%M")
 
-            _s.log(
-                f"Scan histórico: [bold]{_s.data_from}[/bold] → [bold]{_s.data_to}[/bold] "
-                f"| [cyan]{_s.pct_done:.1f}%[/cyan] concluído | [yellow]{_s.days_remaining}d restantes[/yellow]"
-            )
+                total_days        = max(1, (now_dt - initial_dt).days)
+                done_days         = max(0, (cursor_dt - initial_dt).days)
+                _s.pct_done       = done_days / total_days * 100
+                _s.days_remaining = max(0, (now_dt - window_end_dt).days)
+
+                _s.log(
+                    f"Scan histórico: [bold]{_s.data_from}[/bold] → [bold]{_s.data_to}[/bold] "
+                    f"| [cyan]{_s.pct_done:.1f}%[/cyan] | [yellow]{_s.days_remaining}d restantes[/yellow]"
+                )
+
+                batch = []
+                for page_num, page_records in api_client.fetch_pages(_s.data_from, _s.data_to, sort_dir=None):
+                    if _s.stop.is_set():
+                        _flush(batch)
+                        return
+
+                    _s.page         = page_num
+                    _s.page_records = len(page_records)
+                    if page_records:
+                        _s.last_record = page_records[-1]
+
+                    _s.log(f"Histórico — página [bold]{page_num}[/bold]: {len(page_records)} registros")
+
+                    batch.extend(page_records)
+                    if len(batch) >= config.BATCH_SIZE:
+                        _flush(batch)
+                        batch = []
+
+                _flush(batch)
+
+                if not _s.stop.is_set():
+                    db.set_forward_cursor(conn, _s.data_to)
+                    # Atualiza cursor e % para o próximo ciclo
+                    cursor_dt = window_end_dt
+                    cursor_str = _s.data_to
+                    new_total  = max(1, (now_dt - initial_dt).days)
+                    new_done   = max(0, (cursor_dt - initial_dt).days)
+                    _s.pct_done = new_done / new_total * 100
+                    _s.log(f"[green]✔ Scan histórico | cursor → {_s.data_to} | {_s.pct_done:.1f}% concluído[/green]")
+            else:
+                _s.log(f"[dim]Histórico completo (cursor em {cursor_str})[/dim]")
+
+            if _s.stop.is_set():
+                break
+
+            # ─────────────────────────────────────────────────────────────────
+            # Operação 2 — Sync incremental (last_sync_date → now, DESC)
+            # ─────────────────────────────────────────────────────────────────
+            _s.operation  = "Sync incremental"
+            _s.pct_done   = 0.0
+            _s.data_from  = db.get_last_sync_date(conn) or config.INITIAL_DATE
+            _s.data_to    = datetime.now().strftime("%Y-%m-%dT%H:%M")
+            _s.log(f"Sync incremental: [bold]{_s.data_from}[/bold] → [bold]{_s.data_to}[/bold]")
 
             batch = []
-            for page_num, page_records in api_client.fetch_pages(_s.data_from, _s.data_to, sort_dir=None):
+            for page_num, page_records in api_client.fetch_pages(_s.data_from, _s.data_to, sort_dir="DESC"):
                 if _s.stop.is_set():
-                    _s.log("[yellow]Parada solicitada — salvando lote atual[/yellow]")
                     _flush(batch)
-                    return
+                    break
 
                 _s.page         = page_num
                 _s.page_records = len(page_records)
                 if page_records:
                     _s.last_record = page_records[-1]
 
-                _s.log(f"Histórico — página [bold]{page_num}[/bold]: {len(page_records)} registros")
+                record_ids = [r.get("id") for r in page_records if r.get("id")]
+                should_stop = False
+                if record_ids:
+                    existing       = db.count_existing_ids(conn, record_ids)
+                    _s.new_in_page = len(record_ids) - existing
+                    _s.dup_in_page = existing
+                    dup_ratio      = existing / len(record_ids)
+                    _s.log(
+                        f"Incremental — pág [bold]{page_num}[/bold]: "
+                        f"[green]{_s.new_in_page} novos[/green] + [dim]{_s.dup_in_page} existentes[/dim] "
+                        f"([yellow]{dup_ratio*100:.0f}%[/yellow] dup)"
+                    )
+                    if dup_ratio >= config.DUPLICATE_THRESHOLD:
+                        _s.log("[yellow]Threshold de duplicatas — todos os novos processados[/yellow]")
+                        should_stop = True
 
                 batch.extend(page_records)
                 if len(batch) >= config.BATCH_SIZE:
                     _flush(batch)
                     batch = []
 
+                if should_stop:
+                    break
+
             _flush(batch)
 
             if not _s.stop.is_set():
-                db.set_forward_cursor(conn, _s.data_to)
-                _s.log(f"[green]✔ Scan histórico concluído | cursor → {_s.data_to}[/green]")
+                db.set_last_sync_date(conn, _s.data_to)
+                _s.log(f"[bold green]✔ Ciclo {_s.cycle} concluído[/bold green]")
 
-        else:
-            _s.log(f"[dim]Scan histórico completo (cursor em {cursor_str})[/dim]")
-
-        if _s.stop.is_set():
-            return
-
-        # ─────────────────────────────────────────────────────────────────────
-        # Operação 2 — Sync incremental (last_sync_date → now, DESC)
-        # Pega dados novos desde o último run. Para quando bate no threshold
-        # de duplicatas — os registros novos já foram processados (DESC garante).
-        # ─────────────────────────────────────────────────────────────────────
-        _s.operation    = "Sync incremental"
-        _s.pct_done     = 0.0
-        _s.data_from    = db.get_last_sync_date(conn) or config.INITIAL_DATE
-        _s.data_to      = datetime.now().strftime("%Y-%m-%dT%H:%M")
-        _s.log(f"Sync incremental: [bold]{_s.data_from}[/bold] → [bold]{_s.data_to}[/bold]")
-
-        batch = []
-        for page_num, page_records in api_client.fetch_pages(_s.data_from, _s.data_to, sort_dir="DESC"):
             if _s.stop.is_set():
-                _s.log("[yellow]Parada solicitada — salvando lote atual[/yellow]")
-                _flush(batch)
-                return
-
-            _s.page         = page_num
-            _s.page_records = len(page_records)
-            if page_records:
-                _s.last_record = page_records[-1]
-
-            # Contagem de novos vs existentes para feedback e early-stop
-            record_ids = [r.get("id") for r in page_records if r.get("id")]
-            should_stop = False
-            if record_ids:
-                existing       = db.count_existing_ids(conn, record_ids)
-                _s.new_in_page = len(record_ids) - existing
-                _s.dup_in_page = existing
-                dup_ratio      = existing / len(record_ids)
-                _s.log(
-                    f"Incremental — pág [bold]{page_num}[/bold]: "
-                    f"[green]{_s.new_in_page} novos[/green] + [dim]{_s.dup_in_page} existentes[/dim] "
-                    f"([yellow]{dup_ratio*100:.0f}%[/yellow] dup)"
-                )
-                if dup_ratio >= config.DUPLICATE_THRESHOLD:
-                    _s.log("[yellow]Threshold de duplicatas atingido — todos os novos processados[/yellow]")
-                    should_stop = True
-
-            batch.extend(page_records)
-            if len(batch) >= config.BATCH_SIZE:
-                _flush(batch)
-                batch = []
-
-            if should_stop:
                 break
 
-        _flush(batch)
+            # ─────────────────────────────────────────────────────────────────
+            # Pausa entre ciclos
+            # Se ainda há histórico pendente: sem pausa (próximo ciclo imediato)
+            # Se histórico completo: aguarda SYNC_INTERVAL segundos
+            # ─────────────────────────────────────────────────────────────────
+            fwd_now    = db.get_forward_cursor(conn) or config.INITIAL_DATE
+            fwd_dt_now = datetime.strptime(fwd_now, "%Y-%m-%dT%H:%M")
+            history_done = fwd_dt_now >= datetime.now()
 
-        if not _s.stop.is_set():
-            db.set_last_sync_date(conn, _s.data_to)
-            _s.log("[bold green]✔ Sync concluído com sucesso[/bold green]")
+            if history_done:
+                wait_secs       = config.SYNC_INTERVAL
+                _s.operation    = "Aguardando"
+                _s.wait_total   = wait_secs
+                _s.wait_left    = wait_secs
+                _s.log(f"Histórico completo — próximo sync em [bold]{wait_secs}s[/bold]")
+                for i in range(wait_secs):
+                    if _s.stop.is_set():
+                        break
+                    _s.wait_left = wait_secs - i
+                    time.sleep(1)
+                _s.wait_left = 0
+            # else: histórico ainda pendente → próximo ciclo imediatamente
 
     except Exception as exc:
         _s.error = str(exc)
@@ -333,10 +379,11 @@ def _show_summary():
     t = Table.grid(padding=(0, 3))
     t.add_column(style="bold cyan", no_wrap=True)
     t.add_column()
-    t.add_row("Upsertados nesta execução", f"[bold green]{_s.added:,}[/bold green]")
-    t.add_row("Total no banco de dados",   f"[bold white]{total_db}[/bold white]")
+    t.add_row("Ciclos executados",        f"[bold white]{_s.cycle}[/bold white]")
+    t.add_row("Upsertados nesta sessão",  f"[bold green]{_s.added:,}[/bold green]")
+    t.add_row("Total no banco de dados",  f"[bold white]{total_db}[/bold white]")
     if fwd_cursor:
-        t.add_row("Cursor histórico",      f"[cyan]{fwd_cursor}[/cyan]")
+        t.add_row("Cursor histórico",     f"[cyan]{fwd_cursor}[/cyan]")
 
     if last_row:
         ticket   = last_row.get("ticketId")   or last_row.get("ticket_id",    "—")
@@ -354,7 +401,7 @@ def _show_summary():
         t.add_row("  Data inserção", str(ins_date))
 
     border = "red" if _s.error else "green"
-    title  = "Encerrado com erro" if _s.error else "✔ Sincronização Concluída"
+    title  = "Encerrado com erro" if _s.error else "✔ Sessão Encerrada"
     console.print(Panel(t, title=f"[bold]{title}[/bold]", border_style=border))
 
     if _s.error:
@@ -411,7 +458,7 @@ def main():
         menu = Table.grid(padding=(0, 4))
         menu.add_column(style="bold yellow", no_wrap=True)
         menu.add_column(style="white")
-        menu.add_row("[1]", "Iniciar Sincronização")
+        menu.add_row("[1]", "Iniciar Sincronização Contínua")
         menu.add_row("[2]", "Ver Estado Atual")
         menu.add_row("[3]", "Sair")
 
