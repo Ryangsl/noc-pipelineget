@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS history_io (
     id            VARCHAR(36)  PRIMARY KEY,
     insert_date   DATETIME,
     cod_response  INT,
-    result        TEXT,
+    result        MEDIUMTEXT,
     msg_id        VARCHAR(36),
     ticket_id     VARCHAR(100),
     use_cases     JSON,
@@ -61,6 +61,17 @@ def init_tables(conn):
     cursor = conn.cursor()
     for ddl in (DDL_USE_CASES, DDL_HISTORY_IO, DDL_SYNC_STATE):
         cursor.execute(ddl)
+    # Migrate result column to MEDIUMTEXT if it was created with a smaller type
+    cursor.execute("""
+        SELECT DATA_TYPE FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE()
+          AND TABLE_NAME   = 'history_io'
+          AND COLUMN_NAME  = 'result'
+    """)
+    row = cursor.fetchone()
+    if row and row[0].lower() not in ("mediumtext", "longtext"):
+        logger.info("Migrating result column to MEDIUMTEXT (was %s)", row[0])
+        cursor.execute("ALTER TABLE history_io MODIFY COLUMN result MEDIUMTEXT")
     conn.commit()
     cursor.close()
     logger.info("Tables initialized")
