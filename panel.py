@@ -143,6 +143,9 @@ def _sync_worker():
             db.set_last_sync_date(conn, _s.data_to)
             _s.log("[bold green]✔ Sync concluído com sucesso[/bold green]")
 
+    except api_client.TokenExpiredError as exc:
+        _s.error = str(exc)
+        _s.log("[bold red]Token expirado — renove o Bearer no .env e reinicie[/bold red]")
     except Exception as exc:
         _s.error = str(exc)
         _s.log(f"[bold red]Erro:[/bold red] {exc}")
@@ -275,6 +278,73 @@ def _screen_last_update():
 
     console.print(Panel(t, title="[bold]Último Registro Adicionado[/bold]", border_style="cyan"))
 
+# ─── Tela de migração de colchetes ───────────────────────────────────────────
+
+def _screen_fix_brackets():
+    import json as _json
+
+    console.print(Panel(
+        "[yellow]Convertendo use_cases e micro_service de JSON array para texto...[/yellow]",
+        title="Migração de dados", border_style="yellow"
+    ))
+
+    def parse(val):
+        if val is None:
+            return None
+        try:
+            arr = _json.loads(val) if isinstance(val, str) else val
+            if isinstance(arr, list):
+                return ",".join(str(v) for v in arr) if arr else None
+            return val
+        except Exception:
+            return val
+
+    conn = None
+    try:
+        conn = db.get_connection()
+        read = conn.cursor(dictionary=True)
+        write = conn.cursor()
+
+        last_id, total = "", 0
+        while True:
+            read.execute(
+                "SELECT id, use_cases, micro_service FROM history_io "
+                "WHERE id > %s ORDER BY id LIMIT 10000",
+                (last_id,)
+            )
+            rows = read.fetchall()
+            if not rows:
+                break
+            batch = [
+                (parse(r["use_cases"]), parse(r["micro_service"]), r["id"])
+                for r in rows
+            ]
+            write.executemany(
+                "UPDATE history_io SET use_cases=%s, micro_service=%s WHERE id=%s",
+                batch
+            )
+            conn.commit()
+            total += len(rows)
+            last_id = rows[-1]["id"]
+            console.print(f"  Convertidos: [bold white]{total:,}[/bold white]")
+
+        write.execute("ALTER TABLE history_io MODIFY COLUMN use_cases TEXT")
+        write.execute("ALTER TABLE history_io MODIFY COLUMN micro_service TEXT")
+        conn.commit()
+        read.close()
+        write.close()
+
+        console.print(Panel(
+            f"[bold green]✔ Concluído — {total:,} registros convertidos[/bold green]",
+            border_style="green"
+        ))
+    except Exception as exc:
+        console.print(Panel(f"[red]{exc}[/red]", title="Erro na migração", border_style="red"))
+    finally:
+        if conn and conn.is_connected():
+            conn.close()
+
+
 # ─── Menu principal ───────────────────────────────────────────────────────────
 
 def main():
@@ -286,7 +356,8 @@ def main():
         menu.add_column(style="white")
         menu.add_row("[1]", "Iniciar Sincronização")
         menu.add_row("[2]", "Ver Último Registro Adicionado")
-        menu.add_row("[3]", "Sair")
+        menu.add_row("[3]", "Remover colchetes (use_cases / micro_service)")
+        menu.add_row("[4]", "Sair")
 
         console.print(Panel(
             menu,
@@ -296,7 +367,7 @@ def main():
             padding=(1, 6),
         ))
 
-        choice = Prompt.ask("Opção", choices=["1", "2", "3"])
+        choice = Prompt.ask("Opção", choices=["1", "2", "3", "4"])
 
         if choice == "1":
             console.clear()
@@ -307,6 +378,10 @@ def main():
             _screen_last_update()
             Prompt.ask("\n[dim]Pressione Enter para voltar ao menu[/dim]")
         elif choice == "3":
+            console.clear()
+            _screen_fix_brackets()
+            Prompt.ask("\n[dim]Pressione Enter para voltar ao menu[/dim]")
+        elif choice == "4":
             console.print("[dim]Saindo...[/dim]")
             sys.exit(0)
 

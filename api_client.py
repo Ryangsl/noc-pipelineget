@@ -7,6 +7,10 @@ logger = logging.getLogger(__name__)
 TIMEOUT = 30
 
 
+class TokenExpiredError(Exception):
+    pass
+
+
 def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {config.API_TOKEN}"}
 
@@ -17,6 +21,8 @@ def get_use_cases() -> dict:
     logger.info("Fetching use cases from %s", url)
 
     response = requests.get(url, headers=_auth_headers(), timeout=TIMEOUT)
+    if response.status_code == 401:
+        raise TokenExpiredError("Token expirado. Renove o Bearer no .env e reinicie.")
     response.raise_for_status()
 
     data = response.json()
@@ -60,6 +66,8 @@ def fetch_monitoring_page(data_from: str, data_to: str, page: int) -> list:
 
     logger.debug("POST %s page=%d", url, page)
     response = requests.post(url, json=payload, headers=_auth_headers(), timeout=TIMEOUT)
+    if response.status_code == 401:
+        raise TokenExpiredError("Token expirado. Renove o Bearer no .env e reinicie.")
     response.raise_for_status()
 
     return response.json().get("content", [])
